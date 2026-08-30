@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+/dist/
+/build/
+/out/
+/.next/
+/.nuxt/
+/.vite/
+/.cache/
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.database
+.env.llm
+
+# TypeScript
+*.tsbuildinfo
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal

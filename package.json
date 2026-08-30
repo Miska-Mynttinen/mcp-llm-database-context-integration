@@ -1,0 +1,42 @@
+{
+  "name": "mcp-llm-database-context-integration",
+  "version": "1.0.0",
+  "description": "A general platform for integrating Large Language Models of your choice to a MCP Client and MCP server integration to a database of your choice",
+  "keywords": [
+    "mcp",
+    "llm",
+    "database",
+    "context"
+  ],
+  "license": "ISC",
+  "author": "Miska Mynttinen",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "npm run build && node --test tests/e2e.test.js",
+    "build": "tsc && npm run mcp-client:build && npm run mcp-server:build",
+    "start": "node dist/index.js",
+    "dev": "npm run build && npm start",
+    "frontend:dev": "cd frontend && npm run dev",
+    "mcp-setup-podman": "bash ./scripts/mcp-setup-podman.sh",
+    "mcp-stop-podman": "bash ./scripts/mcp-stop-podman.sh",
+    "mcp-client:build": "cd mcp-client && npm install && npm run build",
+    "mcp-server:build": "cd mcp-server && npm install && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "openai": "^4.77.0",
+    "@anthropic-ai/sdk": "^0.16.0",
+    "express": "^4.18.0",
+    "dotenv": "^16.0.0",
+    "pg": "^8.11.0",
+    "mysql2": "^3.6.0",
+    "sqlite3": "^5.1.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/express": "^4.17.0",
+    "@types/pg": "^8.10.0"
+  }
+}
