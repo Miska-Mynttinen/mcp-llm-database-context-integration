@@ -2,6 +2,8 @@
 
 A chat API and web UI that lets an LLM answer questions about a SQL database. The model never touches the database directly. It calls a small set of validated, read-only tools, and the app runs them and feeds the results back.
 
+Deployed at: https://chat.miska-mynttinen.fi/
+
 The LLM backend and the database can each be swapped through their own config file (`.env.llm` and `.env.database`), with no code changes:
 
 | | Supported |
