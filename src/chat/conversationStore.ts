@@ -1,143 +1,80 @@
-import { DatabaseAdapter } from '../database/types';
-import { ChatMessage, ChatSession, ConversationStore } from './types';
+import { type ChatMessage, type ChatRole, type ChatSession } from './types';
 
-export class DatabaseConversationStore implements ConversationStore {
-  private memory = new Map<string, { session: ChatSession; messages: ChatMessage[] }>();
+export const DEFAULT_HISTORY_LIMIT = 20;
+export const MAX_HISTORY_LIMIT = 100;
 
-  constructor(private readonly databaseAdapter?: DatabaseAdapter) {}
+/** The roles people see and write: tool records are model context, not conversation. */
+export const VISIBLE_ROLES: readonly ChatRole[] = ['user', 'assistant'];
 
-  async ensureSession(sessionId: string, userId?: string): Promise<ChatSession> {
-    const normalizedId = sessionId || userId || 'default';
+export interface UserHistoryQuery {
+  /** See `clampHistoryLimit`. */
+  limit?: number;
+  /** Only messages with these roles; every role when omitted. */
+  roles?: readonly ChatRole[];
+  /** Leaves out this session, e.g. the conversation already in the model's context. */
+  excludeSessionId?: string;
+}
 
-    if (!this.databaseAdapter) {
-      const existing = this.memory.get(normalizedId);
-      if (existing) {
-        return existing.session;
-      }
-      const session: ChatSession = {
-        id: normalizedId,
-        userId,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      this.memory.set(normalizedId, { session, messages: [] });
-      return session;
-    }
-
-    await this.databaseAdapter.query(`
-      CREATE TABLE IF NOT EXISTS chat_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-
-    await this.databaseAdapter.query(`
-      CREATE TABLE IF NOT EXISTS chat_messages (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-
-    const existing = await this.databaseAdapter.query(
-      'SELECT * FROM chat_sessions WHERE id = ? LIMIT 1',
-      [normalizedId],
-    );
-
-    if (existing.rows.length > 0) {
-      const row = existing.rows[0];
-      return {
-        id: row.id,
-        userId: row.user_id || undefined,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      };
-    }
-
-    const now = new Date().toISOString();
-    const session: ChatSession = {
-      id: normalizedId,
-      userId,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await this.databaseAdapter.query(
-      'INSERT INTO chat_sessions (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)',
-      [session.id, session.userId || null, session.createdAt, session.updatedAt],
-    );
-
-    return session;
+/** The session doesn't exist for this user: it is missing, unowned, or owned by someone else. */
+export class SessionNotFoundError extends Error {
+  constructor() {
+    super('Session not found');
   }
+}
 
-  async appendMessage(sessionId: string, role: 'user' | 'assistant' | 'system', content: string): Promise<ChatMessage> {
-    const normalizedSessionId = sessionId || 'default';
-    const now = new Date().toISOString();
-    const id = `${normalizedSessionId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const message: ChatMessage = {
-      id,
-      sessionId: normalizedSessionId,
-      role,
-      content,
-      createdAt: now,
-    };
+/**
+ * A session the caller has proven it owns: the only way to read or write a session's messages.
+ * Get one from `ConversationStore.openSession` or `findOwnedSession`.
+ */
+export interface OwnedSession extends ChatSession {
+  /** Appends a message; throws when the session has been cleared since it was opened. */
+  append(role: ChatRole, content: string): Promise<ChatMessage>;
+  /**
+   * The newest `limit` messages, oldest first, counting only `roles` (every role when omitted).
+   * See `clampHistoryLimit` for `limit`.
+   */
+  recent(limit?: number, roles?: readonly ChatRole[]): Promise<ChatMessage[]>;
+  /** Deletes the session and its messages. */
+  clear(): Promise<void>;
+}
 
-    if (!this.databaseAdapter) {
-      const existing = this.memory.get(normalizedSessionId) || { session: { id: normalizedSessionId, createdAt: now, updatedAt: now }, messages: [] };
-      existing.messages.push(message);
-      existing.session.updatedAt = now;
-      this.memory.set(normalizedSessionId, existing);
-      return message;
-    }
+/**
+ * Sessions and their messages. A session's messages are reached only through the `OwnedSession`
+ * that `openSession` or `findOwnedSession` return, so every read and write is ownership-checked.
+ */
+export interface ConversationStore {
+  /**
+   * The session, created for `userId` if it doesn't exist yet. Safe when two requests create
+   * the same session at once. Throws `SessionNotFoundError` when it exists and `userId` doesn't own it.
+   */
+  openSession(sessionId: string, userId: string): Promise<OwnedSession>;
+  /**
+   * The session if `userId` owns it; undefined when it doesn't exist.
+   * Throws `SessionNotFoundError` when someone else, or no one, owns it.
+   */
+  findOwnedSession(sessionId: string, userId: string): Promise<OwnedSession | undefined>;
+  /** The newest messages matching `query` across every session owned by `userId`, oldest first. */
+  getRecentMessagesForUser(userId: string, query?: UserHistoryQuery): Promise<ChatMessage[]>;
+}
 
-    await this.databaseAdapter.query(
-      'INSERT INTO chat_messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)',
-      [message.id, message.sessionId, message.role, message.content, message.createdAt],
-    );
-
-    await this.databaseAdapter.query(
-      'UPDATE chat_sessions SET updated_at = ? WHERE id = ?',
-      [now, normalizedSessionId],
-    );
-
-    return message;
+/** A history size as an integer in [1, MAX_HISTORY_LIMIT]; anything unusable (NaN, < 1, missing) means the default. */
+export function clampHistoryLimit(limit: unknown): number {
+  const requested = Number(limit ?? DEFAULT_HISTORY_LIMIT);
+  if (!Number.isFinite(requested) || requested < 1) {
+    return DEFAULT_HISTORY_LIMIT;
   }
+  return Math.min(Math.floor(requested), MAX_HISTORY_LIMIT);
+}
 
-  async getRecentMessages(sessionId: string, limit = 20): Promise<ChatMessage[]> {
-    const normalizedSessionId = sessionId || 'default';
+/** Whether `message` passes a `roles` filter; an omitted filter passes every role. */
+export function hasRole(message: ChatMessage, roles: readonly ChatRole[] | undefined): boolean {
+  return !roles || roles.includes(message.role);
+}
 
-    if (!this.databaseAdapter) {
-      const existing = this.memory.get(normalizedSessionId);
-      return (existing?.messages || []).slice(-limit);
-    }
-
-    const result = await this.databaseAdapter.query(
-      'SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?',
-      [normalizedSessionId, limit],
-    );
-
-    return result.rows.map((row: any) => ({
-      id: row.id,
-      sessionId: row.session_id,
-      role: row.role,
-      content: row.content,
-      createdAt: row.created_at,
-    }));
+/** Returns the session when `userId` owns it; throws `SessionNotFoundError` otherwise (including ownerless legacy sessions). */
+export function requireOwner(session: ChatSession, userId: string): ChatSession {
+  if (session.userId !== userId) {
+    throw new SessionNotFoundError();
   }
-
-  async clearSession(sessionId: string): Promise<void> {
-    const normalizedSessionId = sessionId || 'default';
-
-    if (!this.databaseAdapter) {
-      this.memory.delete(normalizedSessionId);
-      return;
-    }
-
-    await this.databaseAdapter.query('DELETE FROM chat_messages WHERE session_id = ?', [normalizedSessionId]);
-    await this.databaseAdapter.query('DELETE FROM chat_sessions WHERE id = ?', [normalizedSessionId]);
-  }
+  return session;
 }

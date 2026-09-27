@@ -1,0 +1,53 @@
+# Evaluated by Prometheus and shown in Grafana (Alerting) and at :9090/alerts.
+# No Alertmanager is configured, so nothing is sent anywhere yet.
+groups:
+  - name: availability
+    rules:
+      - alert: AppDown
+        expr: up{job="app"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Chat app is not responding to scrapes
+
+      - alert: McpServerDown
+        expr: up{job="mcp-server"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Database MCP server is not responding to scrapes
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: postgres-exporter cannot reach PostgreSQL
+
+  - name: errors-and-latency
+    rules:
+      - alert: HighHttp5xxRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: More than 5% of API requests fail with 5xx
+
+      - alert: HighLLMErrorRate
+        expr: |
+          sum by (provider, model) (rate(llm_requests_total{outcome="error"}[5m]))
+            / sum by (provider, model) (rate(llm_requests_total[5m])) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 10% of {{ $labels.provider }}/{{ $labels.model }} requests fail"
+
+      - alert: SlowChatTurns
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(chat_turn_duration_seconds_bucket{outcome="success"}[10m]))) > 30
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: p95 chat turn duration is above 30s

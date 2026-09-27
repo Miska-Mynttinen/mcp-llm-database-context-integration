@@ -1,57 +1,40 @@
-import { useState } from 'react'
-import MermaidBlock from './MermaidBlock'
+import { useCallback, useState } from 'react'
+import ChatView from './ChatView'
+import LoginForm from './LoginForm'
+import type { AuthResult } from './api'
+import { loginStore } from './login'
 
-function Answer({ content }: { content: string }) {
-  const sections = content.split(/(```mermaid\s*[\s\S]*?```)/gi)
-
-  return (
-    <div className="answer">
-      {sections.map((section, index) => {
-        const diagram = section.match(/^```mermaid\s*([\s\S]*?)```$/i)
-        if (diagram) {
-          return <MermaidBlock chart={diagram[1].trim()} key={index} />
-        }
-        return section ? <p key={index}>{section}</p> : null
-      })}
-    </div>
-  )
-}
+const SESSION_EXPIRED_NOTICE = 'Your login has expired. Please log in again.'
 
 function App() {
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [sessionId] = useState(() => crypto.randomUUID())
+  const [currentLogin, setCurrentLogin] = useState(() => loginStore.current())
+  const [notice, setNotice] = useState<string | undefined>()
 
-  const ask = async () => {
-    setLoading(true)
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, userId: 'user1', message: question })
-      })
-      const data = await res.json()
-      setAnswer(data.answer || data.error)
-    } catch (error) {
-      setAnswer('Error: ' + (error instanceof Error ? error.message : String(error)))
-    }
-    setLoading(false)
+  const handleLogin = ({ token, user }: AuthResult) => {
+    setNotice(undefined)
+    setCurrentLogin(loginStore.begin({ token, username: user.username }))
   }
 
+  const endLogin = useCallback((message?: string) => {
+    loginStore.end()
+    setNotice(message)
+    setCurrentLogin(null)
+  }, [])
+
+  const handleLogout = useCallback(() => endLogin(), [endLogin])
+  const handleSessionExpired = useCallback(() => endLogin(SESSION_EXPIRED_NOTICE), [endLogin])
+
+  if (!currentLogin) {
+    return <LoginForm onLogin={handleLogin} notice={notice} />
+  }
+  // Keyed by token so a new login starts with freshly loaded history.
   return (
-    <div style={{ padding: '20px' }}>
-      <h1>LLM Database Integration</h1>
-      <input
-        type="text"
-        value={question}
-        onChange={e => setQuestion(e.target.value)}
-        placeholder="Ask a question about the database"
-        style={{ width: '300px', marginRight: '10px' }}
-      />
-      <button onClick={ask} disabled={loading}>{loading ? 'Asking...' : 'Ask'}</button>
-      <Answer content={answer} />
-    </div>
+    <ChatView
+      key={currentLogin.token}
+      login={currentLogin}
+      onLogout={handleLogout}
+      onSessionExpired={handleSessionExpired}
+    />
   )
 }
 

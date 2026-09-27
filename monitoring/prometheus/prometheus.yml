@@ -1,0 +1,25 @@
+# Scrapes the compose services by service name. Started with:
+#   docker compose --profile monitoring up
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: app
+    static_configs:
+      - targets: ["app:9464"]
+
+  - job_name: mcp-server
+    static_configs:
+      - targets: ["mcp-server:3001"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

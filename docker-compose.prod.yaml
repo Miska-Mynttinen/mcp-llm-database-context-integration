@@ -1,0 +1,62 @@
+# Production override for docker-compose.yaml:
+#   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
+#
+# - Services run with NODE_ENV=production and refuse to start with the public
+#   development secrets (JWT_SECRET, MCP_AUTH_TOKEN, SEED_USER_PASSWORD, DB_PASSWORD,
+#   DB_READONLY_PASSWORD).
+# - Only the app is published. PostgreSQL, the MCP server and the monitoring stack
+#   are reachable only on the compose network.
+# - Every secret must be set; nothing falls back to a default.
+#
+# Put the app behind a TLS-terminating reverse proxy. Set TRUST_PROXY=1 in
+# .env.limits so per-IP limits see real client IPs, and ALLOWED_ORIGINS in .env
+# if the proxy rewrites the Host header.
+
+x-db-password: &db-password ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (openssl rand -hex 32)}
+x-db-readonly-password: &db-readonly-password ${DB_READONLY_PASSWORD:?set DB_READONLY_PASSWORD in .env (openssl rand -hex 32)}
+
+services:
+  app:
+    environment:
+      NODE_ENV: production
+      DB_PASSWORD: *db-password
+      DB_READONLY_PASSWORD: *db-readonly-password
+    # Loopback only: the reverse proxy on this host forwards to it. Set APP_BIND=0.0.0.0
+    # only if the proxy runs elsewhere.
+    ports: !override
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: *db-password
+    ports: !reset []
+    restart: unless-stopped
+
+  db-seed:
+    # Users and the read-only login only: no sample tables in a production database.
+    command: ["node", "dist/src/seed/cli.js"]
+    environment:
+      NODE_ENV: production
+      DB_PASSWORD: *db-password
+      DB_READONLY_PASSWORD: *db-readonly-password
+
+  mcp-server:
+    environment:
+      NODE_ENV: production
+      DB_READONLY_PASSWORD: *db-readonly-password
+    ports: !reset []
+    restart: unless-stopped
+
+  postgres-exporter:
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/testdb?sslmode=disable
+
+  prometheus:
+    ports: !reset []
+
+  grafana:
+    # Loopback only: reach it through an SSH tunnel, not the open internet. With the
+    # monitoring profile, set GRAFANA_ADMIN_PASSWORD in .env (the default is admin).
+    ports: !override
+      - "127.0.0.1:3002:3000"

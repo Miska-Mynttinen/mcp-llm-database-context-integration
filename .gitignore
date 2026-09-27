@@ -2,7 +2,7 @@
 node_modules/
 
 # Build outputs
-/dist/
+dist/
 /build/
 /out/
 /.next/
@@ -14,10 +14,16 @@ node_modules/
 logs/
 *.log
 
-# Environment files
+# Environment files (the *.example templates are committed)
 .env
-.env.database
-.env.llm
+.env.*
+!.env*.example
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
 
 # TypeScript
 *.tsbuildinfo

@@ -1,14 +1,60 @@
 /**
- * LLM Provider abstraction - defines interface for all LLM providers
+ * LLM Provider abstraction. Each adapter translates these provider-neutral shapes
+ * to its own wire protocol (native tool calling, or the text protocol for models without it).
  */
 
-export interface Message {
-  role: 'system' | 'user' | 'assistant';
+/** A tool the model may call. `inputSchema` is a JSON Schema object. */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface LLMToolCall {
+  /** Provider-issued id linking the call to its result message. */
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  /** Set when the provider returned arguments that could not be parsed; the call must not run. */
+  argumentsError?: string;
+}
+
+export interface SystemMessage {
+  role: 'system';
   content: string;
 }
 
-export interface CompletionResponse {
+export interface UserMessage {
+  role: 'user';
   content: string;
+}
+
+export interface AssistantMessage {
+  role: 'assistant';
+  content: string;
+  toolCalls?: LLMToolCall[];
+  /**
+   * The provider's own representation of this reply (e.g. Anthropic content blocks with
+   * thinking), echoed back unchanged within the same turn. Opaque to callers.
+   */
+  providerState?: unknown;
+}
+
+export interface ToolResultMessage {
+  role: 'tool';
+  toolCallId: string;
+  toolName: string;
+  content: string;
+  isError?: boolean;
+}
+
+export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
+
+export interface ChatReply {
+  /** The model's text. May be empty when it only calls tools. */
+  content: string;
+  toolCalls: LLMToolCall[];
+  providerState?: unknown;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -16,39 +62,12 @@ export interface CompletionResponse {
   };
 }
 
-export interface ProviderCapabilities {
-  supportsChatCompletion: boolean;
-  supportsStreaming: boolean;
-  supportsImageInput: boolean;
-  supportsToolUse: boolean;
-}
-
 export interface LLMProvider {
   /**
-   * Get capabilities of this provider
+   * Sends the conversation. When `tools` is non-empty the model may reply with tool calls;
+   * the caller runs them and continues with `assistant` + `tool` messages.
    */
-  getCapabilities(): ProviderCapabilities;
-
-  /**
-   * Send a single completion request
-   * @param prompt The prompt/question
-   * @returns Completion response
-   */
-  complete(prompt: string): Promise<CompletionResponse>;
-
-  /**
-   * Send a chat completion request with conversation history
-   * @param messages Array of messages in conversation
-   * @param model Optional model override
-   * @returns Completion response
-   */
-  chat(messages: Message[], model?: string): Promise<CompletionResponse>;
-
-  /**
-   * Get available models for this provider
-   * @returns Array of model identifiers
-   */
-  getAvailableModels(): Promise<string[]>;
+  chat(messages: readonly Message[], tools?: readonly ToolSpec[]): Promise<ChatReply>;
 
   /**
    * Close/cleanup resources

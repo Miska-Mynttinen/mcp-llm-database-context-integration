@@ -1,11 +1,24 @@
+# Local development. The images default to NODE_ENV=production, which refuses the
+# development secrets used here, so this file sets NODE_ENV=development.
+# To deploy, add the production override:
+#   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
 services:
   app:
     build: .
+    # LLM settings come from .env.llm (copy .env.llm.example). For Ollama on the
+    # host, set LLM_BASE_URL=http://host.docker.internal:11434 there.
+    env_file:
+      - .env.llm
+      # MCP_AUTH_TOKEN, shared with mcp-server (copy .env.mcp.example).
+      - .env.mcp
+      # Rate limits and daily AI token budgets (copy .env.limits.example); optional,
+      # the defaults apply without it.
+      - path: .env.limits
+        required: false
+    # The database is the compose-managed postgres service below, so its settings
+    # are fixed here rather than read from .env.database.
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_MODEL: ${LLM_MODEL:-llama2}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
+      NODE_ENV: development
       MCP_SERVER_URLS: http://mcp-server:3001/mcp
       DB_TYPE: postgres
       DB_HOST: postgres
@@ -13,15 +26,34 @@ services:
       DB_USER: postgres
       DB_PASSWORD: password
       DB_NAME: testdb
+      # The MCP server's read-only login. The app re-grants it at startup, so tables
+      # added by a new version stay hidden from it.
+      DB_READONLY_USER: mcp_reader
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:-readonly-password}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Metrics listen on 9464 for Prometheus on the compose network only; the port
+      # is deliberately not published below.
+      METRICS_HOST: 0.0.0.0
+      # Set JWT_SECRET and SEED_USER_PASSWORD in .env (compose reads it for these
+      # substitutions). user1..user5 are seeded into postgres on first start.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:?set SEED_USER_PASSWORD in .env}
     ports:
       - "3000:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # The LLM's database tools come only from mcp-server, and the app discovers MCP
+    # tools once at startup, so it waits until mcp-server answers.
     depends_on:
-      - postgres
+      postgres:
+        condition: service_started
+      mcp-server:
+        condition: service_healthy
 
   postgres:
-    image: postgres:13
+    image: postgres:16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -30,17 +62,137 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-  mcp-server:
-    build: ./mcp-server
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "testdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot, before the MCP server connects: creates the sample tables (product,
+  # shipment, unit, complaints) with their data, the app tables, the read-only login
+  # mcp_reader (SELECT on every table but the app tables; tables created later by
+  # postgres are readable too), and the users user1..user5. Idempotent.
+  db-seed:
+    build: .
+    command: ["node", "dist/src/seed/cli.js", "--sample-data"]
     environment:
+      NODE_ENV: development
+      DB_TYPE: postgres
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: postgres
       DB_PASSWORD: password
       DB_NAME: testdb
+      DB_READONLY_USER: mcp_reader
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:-readonly-password}
+      SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:?set SEED_USER_PASSWORD in .env}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: packages/mcp-server/Dockerfile
+    # MCP_AUTH_TOKEN: only the app, which holds the same token, may call /mcp.
+    env_file:
+      - .env.mcp
+    # Connects as the read-only login only: it never gets the owner's password, and the
+    # database refuses it the app tables and every write.
+    environment:
+      NODE_ENV: development
+      DB_TYPE: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: testdb
+      DB_READONLY_USER: mcp_reader
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:-readonly-password}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Published on the host's loopback only, for local tools; the app reaches it over
+    # the compose network. Remove this to keep it off the host entirely.
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/metrics').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      db-seed:
+        condition: service_completed_successfully
+
+  # --- Monitoring: docker compose --profile monitoring up ---
+  # Grafana http://localhost:3002, Prometheus http://localhost:9090. Configs live in monitoring/.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:3.7.8
+    profiles: [monitoring]
+    command: -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./monitoring/loki/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+
+  # Tails this project's container logs through the Docker socket and pushes them to Loki.
+  # For rootless Podman, set DOCKER_SOCK=$XDG_RUNTIME_DIR/podman/podman.sock.
+  alloy:
+    image: grafana/alloy:v1.20.0
+    profiles: [monitoring]
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    profiles: [monitoring]
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:password@postgres:5432/testdb?sslmode=disable
     depends_on:
       - postgres
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    profiles: [monitoring]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/llm-app-overview.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3002:3000"
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   postgres_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:

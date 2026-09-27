@@ -4,5 +4,7 @@ dist
 **/dist
 .git
 .env
+.env.*
 *.db
 npm-debug.log
+monitoring

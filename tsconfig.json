@@ -10,6 +10,6 @@
     "forceConsistentCasingInFileNames": true,
     "moduleResolution": "node16"
   },
-  "include": ["index.ts"],
-  "exclude": ["node_modules", "dist", "frontend", "mcp-client", "mcp-server"]
+  "include": ["index.ts", "src/**/*"],
+  "exclude": ["node_modules", "dist", "frontend", "packages"]
 }

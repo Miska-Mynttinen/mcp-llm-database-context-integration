@@ -1,0 +1,19 @@
+{
+  "name": "@mcp-llm/runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deployment config shared by the chat app and the MCP server: env files, secret checks, logging, metric conventions",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

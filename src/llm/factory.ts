@@ -1,118 +1,96 @@
-import { LLMProvider } from './types';
+import { type LLMProvider } from './types';
 import { OpenAIProvider } from './providers/openai';
-import { AnthropicProvider } from './providers/anthropic';
+import { AnthropicProvider, DEFAULT_ANTHROPIC_MODEL } from './providers/anthropic';
 import { OllamaProvider } from './providers/ollama';
+import { withTextToolProtocol } from './textToolProtocol';
 
 export type LLMProviderType = 'openai' | 'anthropic' | 'ollama';
+
+/** `native`: the provider's own tool-calling API. `text`: tools described in the prompt, JSON replies. */
+export type ToolCallingMode = 'native' | 'text';
 
 export interface LLMConfig {
   provider: LLMProviderType;
   model?: string;
   apiKey?: string;
-  baseUrl?: string; // For self-hosted providers like Ollama
+  baseUrl?: string; // Ollama host, or an OpenAI/Anthropic-compatible endpoint
+  toolCalling?: ToolCallingMode;
+  /** Ollama only: the context window in tokens (`num_ctx`). */
+  contextLength?: number;
 }
 
-/**
- * Factory for creating LLM provider instances
- */
-export class LLMFactory {
-  static createFromEnv(): LLMProvider {
-    const providerType = (process.env.LLM_PROVIDER || 'ollama') as LLMProviderType;
-    const model = process.env.LLM_MODEL || this.getDefaultModelForProvider(providerType);
-    const apiKey = process.env.LLM_API_KEY;
-    const baseUrl = process.env.LLM_BASE_URL;
+const DEFAULT_MODELS: Record<LLMProviderType, string> = {
+  openai: 'gpt-3.5-turbo',
+  anthropic: DEFAULT_ANTHROPIC_MODEL,
+  ollama: 'llama2',
+};
 
-    return this.create({
-      provider: providerType,
-      model,
-      apiKey,
-      baseUrl,
-    });
-  }
+// Ollama tool support depends on the model, so it defaults to the model-agnostic text protocol.
+const DEFAULT_TOOL_CALLING: Record<LLMProviderType, ToolCallingMode> = {
+  openai: 'native',
+  anthropic: 'native',
+  ollama: 'text',
+};
 
-  static create(config: LLMConfig): LLMProvider {
-    const { provider, model, apiKey, baseUrl } = config;
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
-    switch (provider) {
-      case 'openai':
-        if (!apiKey) {
-          throw new Error('OpenAI provider requires LLM_API_KEY environment variable');
-        }
-        return new OpenAIProvider(apiKey, model);
+export function readLLMConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LLMConfig {
+  const provider = (env.LLM_PROVIDER || 'ollama') as LLMProviderType;
+  return {
+    provider,
+    model: env.LLM_MODEL || DEFAULT_MODELS[provider],
+    apiKey: env.LLM_API_KEY,
+    baseUrl: env.LLM_BASE_URL || undefined,
+    toolCalling: parseToolCallingMode(env.LLM_TOOL_CALLING),
+    contextLength: parseContextLength(env.LLM_CONTEXT_LENGTH),
+  };
+}
 
-      case 'anthropic':
-        if (!apiKey) {
-          throw new Error('Anthropic provider requires LLM_API_KEY environment variable');
-        }
-        return new AnthropicProvider(apiKey, model);
+export function createLLMProvider(config: LLMConfig = readLLMConfigFromEnv()): LLMProvider {
+  const provider = createBaseProvider(config);
+  const mode = config.toolCalling ?? DEFAULT_TOOL_CALLING[config.provider];
+  return mode === 'text' ? withTextToolProtocol(provider) : provider;
+}
 
-      case 'ollama':
-        const ollamaUrl = baseUrl || 'http://localhost:11434';
-        const ollamaModel = model || 'llama2';
-        return new OllamaProvider(ollamaUrl, ollamaModel);
+function createBaseProvider(config: LLMConfig): LLMProvider {
+  const { provider, model, apiKey, baseUrl, contextLength } = config;
 
-      default:
-        throw new Error(`Unknown LLM provider: ${provider}`);
-    }
-  }
-
-  static getDefaultModelForProvider(provider: LLMProviderType): string {
-    switch (provider) {
-      case 'openai':
-        return 'gpt-3.5-turbo';
-      case 'anthropic':
-        return 'claude-3-sonnet-20240229';
-      case 'ollama':
-        return 'llama2';
-      default:
-        throw new Error(`Unknown provider: ${provider}`);
-    }
-  }
-
-  static validateConfig(config: LLMConfig): { valid: boolean; error?: string } {
-    const { provider, apiKey } = config;
-
-    // API key required for cloud providers
-    if ((provider === 'openai' || provider === 'anthropic') && !apiKey) {
-      return {
-        valid: false,
-        error: `${provider} requires an API key`,
-      };
-    }
-
-    // Ollama doesn't require an API key but requires a running instance
-    if (provider === 'ollama' && !config.baseUrl) {
-      // This is okay - will use default localhost
-    }
-
-    return { valid: true };
+  switch (provider) {
+    case 'openai':
+      return new OpenAIProvider(requireApiKey(provider, apiKey), model, baseUrl);
+    case 'anthropic':
+      return new AnthropicProvider(requireApiKey(provider, apiKey), model, baseUrl);
+    case 'ollama':
+      return new OllamaProvider(baseUrl || DEFAULT_OLLAMA_URL, model || DEFAULT_MODELS.ollama, contextLength);
+    default:
+      throw new Error(`Unknown LLM provider: ${provider}`);
   }
 }
 
-/**
- * Global LLM provider instance
- */
-let globalProvider: LLMProvider | null = null;
-
-export function initializeLLMProvider(config?: LLMConfig): LLMProvider {
-  if (globalProvider) {
-    return globalProvider;
+function parseToolCallingMode(value: string | undefined): ToolCallingMode | undefined {
+  if (!value) {
+    return undefined;
   }
-
-  globalProvider = config ? LLMFactory.create(config) : LLMFactory.createFromEnv();
-  return globalProvider;
+  if (value !== 'native' && value !== 'text') {
+    throw new Error(`LLM_TOOL_CALLING must be "native" or "text", got "${value}"`);
+  }
+  return value;
 }
 
-export function getLLMProvider(): LLMProvider {
-  if (!globalProvider) {
-    globalProvider = LLMFactory.createFromEnv();
+function parseContextLength(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
   }
-  return globalProvider;
+  const tokens = Number(value);
+  if (!Number.isInteger(tokens) || tokens <= 0) {
+    throw new Error(`LLM_CONTEXT_LENGTH must be a positive whole number of tokens, got "${value}"`);
+  }
+  return tokens;
 }
 
-export async function closeLLMProvider(): Promise<void> {
-  if (globalProvider) {
-    await globalProvider.close();
-    globalProvider = null;
+function requireApiKey(provider: LLMProviderType, apiKey: string | undefined): string {
+  if (!apiKey) {
+    throw new Error(`${provider} provider requires LLM_API_KEY (set it in .env.llm)`);
   }
+  return apiKey;
 }
