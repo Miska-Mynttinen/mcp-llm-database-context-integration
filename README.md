@@ -8,6 +8,8 @@ Deployed at: https://chat.miska-mynttinen.fi/
 
 A simplified view of the containers in `docker-compose.yaml` and where each part of the MCP protocol lives. The monitoring stack is left out, see [Monitoring](#monitoring).
 
+![Current Arhitecture](Architecture-image.png)
+
 ```mermaid
 flowchart LR
   browser["Browser<br/>React chat UI"]
