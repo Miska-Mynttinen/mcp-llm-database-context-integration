@@ -190,7 +190,7 @@ LLM_PROVIDER=openai
 LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 LLM_MODEL=gemini-3.5-flash-lite
 LLM_API_KEY=AIza...
-LLM_TOOL_CALLING=text
+LLM_TOOL_CALLING=native
 ```
 
 | Variable | Why this value |
@@ -199,11 +199,37 @@ LLM_TOOL_CALLING=text
 | `LLM_BASE_URL` | Google's OpenAI-compatible endpoint. Keep the trailing `/openai/`. The SDK appends `chat/completions`. |
 | `LLM_MODEL` | `gemini-3.5-flash-lite`: cheapest and fast. Use `gemini-3.5-flash` if SQL or tool use is weak. Drop the `models/` prefix the list shows. The 2.5 models are no longer available to new users. Avoid `*-latest` aliases (they change silently), `*-preview`, and task-specific models (tts, image, live, embedding). |
 | `LLM_API_KEY` | The key from 3a. The app sends it as `Authorization: Bearer`, which Gemini's endpoint accepts. |
-| `LLM_TOOL_CALLING=text` | **Required for Gemini 3+.** With native tool calling, Gemini 3+ attaches a "thought signature" to each tool call and expects it back in the next request. The app's OpenAI provider doesn't keep that field, so the request after a tool result would fail with a 400. In `text` mode the tools are described in the system prompt instead ([src/llm/textToolProtocol.ts](src/llm/textToolProtocol.ts)). The model replies with JSON, and tool results go back as plain messages. No tool API is involved, so there are no signatures. |
+| `LLM_TOOL_CALLING=native` | Gemini's own tool-calling API, the most reliable tool use. `native` is also the default for `openai`, so this line can be left out. See the note below. |
 
 The example file's `LLM_BASE_URL=http://localhost:11434` must be replaced, not just left
 below your values. With duplicate keys it's unclear which value wins, so keep one of each.
-`LLM_CONTEXT_LENGTH` is Ollama-only, and the app ignores it here.
+`LLM_CONTEXT_LENGTH` is Ollama-only, and the app ignores it here. `LLM_TIMEOUT_SECONDS`
+(default 95) is how long each Gemini request may take before it's retried or reported as
+unavailable. Three attempts then stay just under the server's 5-minute request limit. Above
+about 98, a stalled request hits that limit first, and the browser shows "Could not reach the
+server" instead of the "temporarily unavailable" message.
+
+**Tool-calling mode: `native` or `text`.**
+- **`native`**: Gemini 3+ attaches a "thought signature" to each tool call and returns a 400
+  if the next request doesn't send it back. The app's OpenAI provider sends tool calls back
+  exactly as it received them, so the signature is kept. If Gemini still writes invalid arguments
+  for a tool (`MALFORMED_FUNCTION_CALL`), that chat turn fails with a 500; the app doesn't
+  retry in this mode.
+- **`text`**: the fallback if native tool calling misbehaves. The tools are described in the
+  system prompt ([src/llm/textToolProtocol.ts](src/llm/textToolProtocol.ts)), and the model
+  replies with JSON. Gemini sometimes tries a native call anyway, which Google blocks
+  (`MALFORMED_FUNCTION_CALL`). The app then retries once with a reminder to write the JSON as
+  text, so an occasional turn can still fail.
+- **Switching:** change `LLM_TOOL_CALLING` in `~/app/.env.llm` on the VM, then run `dc up -d`
+  (step 6b), which recreates only the app. Nothing else changes: the database, users and
+  conversations are kept.
+
+**Optional: check native tool calling before deploying.** Run the app on your laptop (see the
+local setup in [README.md](README.md)) with a local `.env.llm` holding the settings above. Ask a
+question that takes two tool steps, such as "What columns does the product table have, and how
+many rows does it have?". The answer should arrive with no 400 error about a thought signature,
+and the app log's `Chat turn completed` line should show `toolSteps` of 2 or more and
+`failedTools: 0`. That also confirms tool results pair with their calls (by call ID).
 
 
 **Billing note (paid-tier key only):** The Gemini API has a free tier only for projects
@@ -496,6 +522,7 @@ If something doesn't start:
 | `up` aborts with `set POSTGRES_PASSWORD in .env ...` (or another variable) | A secret is missing | Step 4 |
 | app or mcp-server exits; `dc logs app` says `still use the public development values` | A template secret wasn't replaced | Step 4 |
 | app exits; `dc logs app` mentions an `LLM_*` setting | `.env.llm` is wrong or missing | Step 3c |
+| Chat says the AI service is temporarily unavailable; `dc logs app` shows `LLM request failed` with `Unavailable: 503 ...` or `Unavailable: Request timed out.` | Gemini is overloaded (a Google-side outage, usually brief) | Wait and retry, or set `LLM_MODEL=gemini-3.5-flash` in `.env.llm` and `dc up -d` |
 | caddy logs mention `challenge` or `NXDOMAIN` | DNS doesn't point to the VM yet | 5b, then `dc restart caddy` |
 | Build stops with `Killed` or exit code 137 | Out of memory | Check swap with `free -h` (step 1) |
 
@@ -533,7 +560,10 @@ containers won't be rebuilt or recreated.
    it discovered.
 2. `curl -I https://chat.miska-mynttinen.fi` (your `PUBLIC_HOST`) returns 200 with a valid certificate.
 3. Log in as `user1` / `SEED_USER_PASSWORD` in the browser and ask "What tables are there?".
-   The reply should come from a database tool call.
+   The reply should come from a database tool call. Then ask something that takes two tool
+   steps (see the note at the end of 3c). `dc logs app` should show no `LLM request failed`
+   warnings. A 400 mentioning a thought signature means the running build predates the fix:
+   rerun [Updating later](#updating-later), or set `LLM_TOOL_CALLING=text` in the meantime.
 4. From your laptop, `nc -zv <IP> 5432` and `nc -zv <IP> 3001` must fail (not exposed). `<IP>`
    is the static IP from 5b.
 5. Confirm usage in Cloud console → Generative Language API metrics (in `<GEMINI_PROJECT_ID>`
@@ -544,6 +574,11 @@ containers won't be rebuilt or recreated.
 2. On the VM: `cd ~/app && dc up -d --build` (add `--profile monitoring` if you use it).
 
 Your `.env*` files on the VM, the database and the certificate (`caddy_data`) are kept.
+
+**VM set up with `LLM_TOOL_CALLING=text`?** Earlier versions of this guide required it for
+Gemini. To move to `native`, run the two steps above first, since native mode needs the current
+code. Then change the line in `~/app/.env.llm` to `LLM_TOOL_CALLING=native` and run `dc up -d`. To
+roll back, set it to `text` and run `dc up -d`.
 
 
 

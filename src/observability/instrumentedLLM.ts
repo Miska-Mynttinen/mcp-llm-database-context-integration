@@ -1,4 +1,4 @@
-import { LLMRateLimitError } from '../llm/errors';
+import { LLMRateLimitError, LLMUnavailableError } from '../llm/errors';
 import { type LLMProvider } from '../llm/types';
 import { type Logger, secondsSince } from '@mcp-llm/runtime';
 import { type Metrics } from './metrics';
@@ -33,8 +33,9 @@ export function withLLMTelemetry(llm: LLMProvider, labels: LLMLabels, logger: Lo
   };
 }
 
-/** The provider's own wording for a failure; user-facing rate-limit messages hide it. */
+/** The provider's own wording for a failure; user-facing rate-limit and outage messages hide it. */
 function failureDetail(error: unknown): string {
   if (error instanceof LLMRateLimitError) return `Rate limited: ${error.providerMessage}`;
+  if (error instanceof LLMUnavailableError) return `Unavailable: ${error.providerMessage}`;
   return error instanceof Error ? error.message : String(error);
 }

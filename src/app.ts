@@ -10,7 +10,7 @@ import { authenticatedUser, requireAuth } from './auth/middleware';
 import { requireAllowedOrigin } from './auth/origin';
 import { createRateLimiters, type RequestLimits } from './rateLimit';
 import { TokenBudgetExceededError } from './tokenBudget';
-import { LLMRateLimitError } from './llm/errors';
+import { LLMRateLimitError, LLMUnavailableError } from './llm/errors';
 import { type MCPStatus } from './tools/mcpToolRegistry';
 
 export const MAX_SESSION_ID_LENGTH = 255;
@@ -36,7 +36,7 @@ export interface AppDeps {
   /**
    * When set, sign-up, login, chat and `/api` requests are rate limited (429 once over). Daily token
    * budgets are the chat turn's; the app only maps `TokenBudgetExceededError` (and the provider's
-   * `LLMRateLimitError`) to 429.
+   * `LLMRateLimitError`) to 429. A provider outage (`LLMUnavailableError`) is a 503.
    */
   requestLimits?: RequestLimits;
   /** Reverse proxies whose `X-Forwarded-For` is trusted for `req.ip`; 0 (the default) trusts none. */
@@ -170,18 +170,22 @@ function routeWith({ logger }: Telemetry) {
   };
 }
 
-/** Status for errors that are the client's doing; these are not logged. */
+/**
+ * Status for expected errors: the client's doing, or a known provider limit or outage (already
+ * logged by the LLM telemetry). These are not logged here.
+ */
 function expectedErrorStatus(error: unknown): number | undefined {
   if (error instanceof BadRequestError || error instanceof InvalidCredentialsError) return 400;
   if (error instanceof SessionNotFoundError) return 404;
   if (error instanceof UsernameTakenError) return 409;
   if (error instanceof TokenBudgetExceededError || error instanceof LLMRateLimitError) return 429;
+  if (error instanceof LLMUnavailableError) return 503;
   return undefined;
 }
 
-/** When a daily token budget or the LLM provider's rate limit lets the client try again. */
+/** When a daily token budget, or the LLM provider's rate limit or outage, lets the client try again. */
 function retryAfterSecondsOf(error: unknown): number | undefined {
-  if (error instanceof TokenBudgetExceededError || error instanceof LLMRateLimitError) {
+  if (error instanceof TokenBudgetExceededError || error instanceof LLMRateLimitError || error instanceof LLMUnavailableError) {
     return error.retryAfterSeconds;
   }
   return undefined;

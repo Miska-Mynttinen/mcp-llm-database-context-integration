@@ -191,7 +191,7 @@ The startup log line (`Chat server running on port 3000`) lists the loaded files
 | `LLM_MODEL` | `gpt-3.5-turbo` / `claude-opus-5` / `llama2` | Default depends on the provider |
 | `LLM_API_KEY` | none | Required for OpenAI and Anthropic. Startup fails without it |
 | `LLM_BASE_URL` | `http://localhost:11434` for Ollama | Ollama host, or a compatible OpenAI/Anthropic endpoint |
-| `LLM_TOOL_CALLING` | `native` for OpenAI and Anthropic, `text` for Ollama | `native` uses the provider's tool-calling API. `text` describes the tools in the system prompt and expects a bare JSON reply naming one tool, which works with any instruction-following model but is less reliable. Use `native` with tool-capable Ollama models such as `qwen2.5`, and `text` for an OpenAI-compatible server without tool support |
+| `LLM_TOOL_CALLING` | `native` for OpenAI and Anthropic, `text` for Ollama | `native` uses the provider's tool-calling API. `text` describes the tools in the system prompt and expects a bare JSON reply naming one tool, which works with any instruction-following model but is less reliable. Use `native` with tool-capable Ollama models such as `qwen2.5`, and `text` for an OpenAI-compatible server without tool support. Gemini 3 through its OpenAI-compatible endpoint works with `native` (see [gcp-deploy.md](gcp-deploy.md)) |
 
 For a hosted model:
 
@@ -407,7 +407,7 @@ The LLM and the MCP server are only reached through an authenticated chat turn. 
 npm test
 ```
 
-This builds the packages and the app and runs the whole suite: 256 tests, 60 of which are skipped unless PostgreSQL and MySQL are configured. It needs no LLM, database server or network access. See [ARCHITECTURE.md](ARCHITECTURE.md#14-testing).
+This builds the packages and the app and runs the whole suite: 289 tests, 62 of which are skipped unless PostgreSQL and MySQL are configured. It needs no LLM, database server or network access. See [ARCHITECTURE.md](ARCHITECTURE.md#14-testing).
 
 ## Troubleshooting
 

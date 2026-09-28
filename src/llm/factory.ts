@@ -17,6 +17,8 @@ export interface LLMConfig {
   toolCalling?: ToolCallingMode;
   /** Ollama only: the context window in tokens (`num_ctx`). */
   contextLength?: number;
+  /** OpenAI only: the per-attempt request timeout in seconds. */
+  timeoutSeconds?: number;
 }
 
 const DEFAULT_MODELS: Record<LLMProviderType, string> = {
@@ -33,6 +35,10 @@ const DEFAULT_TOOL_CALLING: Record<LLMProviderType, ToolCallingMode> = {
 };
 
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
+// With the SDK's 2 retries (and at most 1.5 s of backoff), a stalled call gives up after ~287 s:
+// just under Node's default 300 s `requestTimeout`, so the client still gets the 503 message.
+const DEFAULT_OPENAI_TIMEOUT_SECONDS = 95;
+const MS_PER_SECOND = 1000;
 
 export function readLLMConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LLMConfig {
   const provider = (env.LLM_PROVIDER || 'ollama') as LLMProviderType;
@@ -42,7 +48,8 @@ export function readLLMConfigFromEnv(env: NodeJS.ProcessEnv = process.env): LLMC
     apiKey: env.LLM_API_KEY,
     baseUrl: env.LLM_BASE_URL || undefined,
     toolCalling: parseToolCallingMode(env.LLM_TOOL_CALLING),
-    contextLength: parseContextLength(env.LLM_CONTEXT_LENGTH),
+    contextLength: parsePositiveInteger('LLM_CONTEXT_LENGTH', env.LLM_CONTEXT_LENGTH, 'tokens'),
+    timeoutSeconds: parsePositiveInteger('LLM_TIMEOUT_SECONDS', env.LLM_TIMEOUT_SECONDS, 'seconds'),
   };
 }
 
@@ -53,11 +60,13 @@ export function createLLMProvider(config: LLMConfig = readLLMConfigFromEnv()): L
 }
 
 function createBaseProvider(config: LLMConfig): LLMProvider {
-  const { provider, model, apiKey, baseUrl, contextLength } = config;
+  const { provider, model, apiKey, baseUrl, contextLength, timeoutSeconds } = config;
 
   switch (provider) {
     case 'openai':
-      return new OpenAIProvider(requireApiKey(provider, apiKey), model, baseUrl);
+      return new OpenAIProvider(requireApiKey(provider, apiKey), model, baseUrl, {
+        timeoutMs: (timeoutSeconds ?? DEFAULT_OPENAI_TIMEOUT_SECONDS) * MS_PER_SECOND,
+      });
     case 'anthropic':
       return new AnthropicProvider(requireApiKey(provider, apiKey), model, baseUrl);
     case 'ollama':
@@ -77,15 +86,15 @@ function parseToolCallingMode(value: string | undefined): ToolCallingMode | unde
   return value;
 }
 
-function parseContextLength(value: string | undefined): number | undefined {
+function parsePositiveInteger(name: string, value: string | undefined, unit: string): number | undefined {
   if (!value) {
     return undefined;
   }
-  const tokens = Number(value);
-  if (!Number.isInteger(tokens) || tokens <= 0) {
-    throw new Error(`LLM_CONTEXT_LENGTH must be a positive whole number of tokens, got "${value}"`);
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`${name} must be a positive whole number of ${unit}, got "${value}"`);
   }
-  return tokens;
+  return number;
 }
 
 function requireApiKey(provider: LLMProviderType, apiKey: string | undefined): string {

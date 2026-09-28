@@ -10,6 +10,25 @@ export class LLMRateLimitError extends Error {
   }
 }
 
+const UNAVAILABLE_MESSAGE = 'The AI service is temporarily unavailable. Please try again in a moment.';
+
+/**
+ * The LLM provider answered with a 5xx (overloaded or down) after the SDK's own retries.
+ * Like `LLMRateLimitError`, the message is safe to show users and `providerMessage` is for the logs.
+ */
+export class LLMUnavailableError extends Error {
+  constructor(readonly providerMessage: string, readonly retryAfterSeconds?: number) {
+    super(UNAVAILABLE_MESSAGE);
+  }
+}
+
+/** The model tried a native function call the provider rejected (Gemini: MALFORMED_FUNCTION_CALL). */
+export class LLMMalformedToolCallError extends Error {
+  constructor(readonly finishReason: string) {
+    super(`LLM produced a malformed function call (finish_reason: ${finishReason})`);
+  }
+}
+
 /** Response headers as fetch gives them, or as a plain lower-cased record (the OpenAI SDK's form). */
 export type ResponseHeaders = Headers | Readonly<Record<string, string | null | undefined>>;
 

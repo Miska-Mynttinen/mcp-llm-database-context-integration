@@ -1,8 +1,9 @@
-import { LLMRateLimitError, retryAfterSeconds } from '../errors';
+import { LLMRateLimitError, LLMUnavailableError, retryAfterSeconds } from '../errors';
 import { toToolCall } from '../toolArguments';
 import { type ChatReply, type LLMProvider, type Message, type ToolSpec } from '../types';
 
 const RATE_LIMITED_STATUS = 429;
+const FIRST_SERVER_ERROR_STATUS = 500;
 /**
  * Context window requested per call. Ollama otherwise loads models with its own default (often
  * 4096 tokens) and silently cuts longer prompts: the system prompt, schema and tool results.
@@ -63,6 +64,9 @@ export class OllamaProvider implements LLMProvider {
       const error = await response.text();
       if (response.status === RATE_LIMITED_STATUS) {
         throw new LLMRateLimitError(error, retryAfterSeconds(response.headers));
+      }
+      if (response.status >= FIRST_SERVER_ERROR_STATUS) {
+        throw new LLMUnavailableError(`Ollama error: ${response.status} - ${error}`, retryAfterSeconds(response.headers));
       }
       throw new Error(`Ollama error: ${response.status} - ${error}`);
     }

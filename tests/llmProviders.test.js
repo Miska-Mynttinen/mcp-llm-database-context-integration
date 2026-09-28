@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { dist, startStubServer } = require('./helpers');
 
-const { OpenAIProvider, AnthropicProvider, OllamaProvider, LLMRateLimitError, createLLMProvider, readLLMConfigFromEnv } = dist('src/llm');
+const { OpenAIProvider, AnthropicProvider, OllamaProvider, LLMRateLimitError, LLMUnavailableError, LLMMalformedToolCallError, createLLMProvider, readLLMConfigFromEnv } = dist('src/llm');
 const { REFUSAL_ANSWER } = dist('src/llm/providers/anthropic');
 
 const tools = [{
@@ -62,6 +62,28 @@ test('openai: sends function tools and parses tool_calls with string arguments',
   ]);
 });
 
+test('openai: sends Gemini\'s thought signature back with the tool call', async (t) => {
+  const extraContent = { google: { thought_signature: 'sig-1' } };
+  const stub = await startStubServer((request, count) => ({
+    body: count === 1
+      ? openAICompletion({
+        content: null,
+        tool_calls: [{
+          id: 'call_g', type: 'function', extra_content: extraContent,
+          function: { name: 'get_table_columns', arguments: '{"tableName":"users"}' },
+        }],
+      }, 'tool_calls')
+      : openAICompletion({ content: 'users has id.' }),
+  }));
+  t.after(stub.close);
+  const provider = new OpenAIProvider('test-key', 'gemini-test', stub.url);
+
+  const first = await provider.chat([{ role: 'user', content: 'Columns of users?' }], tools);
+  await provider.chat(conversationAfterToolCall(first), tools);
+
+  assert.deepEqual(stub.requests[1].body.messages[2].tool_calls[0].extra_content, extraContent);
+});
+
 test('openai: omits tools when none are given and flags malformed arguments', async (t) => {
   const stub = await startStubServer(() => ({
     body: openAICompletion({
@@ -75,6 +97,24 @@ test('openai: omits tools when none are given and flags malformed arguments', as
   const reply = await provider.chat([{ role: 'user', content: 'hi' }]);
   assert.equal('tools' in stub.requests[0].body, false);
   assert.match(reply.toolCalls[0].argumentsError, /not valid JSON/);
+});
+
+test('openai: rejects a whitespace-only reply and names the finish reason', async (t) => {
+  const stub = await startStubServer(() => ({ body: openAICompletion({ content: '\n' }, 'length') }));
+  t.after(stub.close);
+  const provider = new OpenAIProvider('test-key', 'gpt-test', stub.url);
+
+  await assert.rejects(provider.chat([{ role: 'user', content: 'hi' }]), /no text \(finish_reason: length\)/);
+});
+
+test('openai: flags a native call the provider blocked as malformed', async (t) => {
+  const finishReason = 'function_call_filter: MALFORMED_FUNCTION_CALL';
+  const stub = await startStubServer(() => ({ body: openAICompletion({ content: null }, finishReason) }));
+  t.after(stub.close);
+  const provider = new OpenAIProvider('test-key', 'gpt-test', stub.url);
+
+  await assert.rejects(provider.chat([{ role: 'user', content: 'hi' }]), (error) =>
+    error instanceof LLMMalformedToolCallError && error.finishReason === finishReason);
 });
 
 // --- Anthropic Messages --------------------------------------------------------------------
@@ -206,6 +246,41 @@ for (const [name, create, body] of [
   });
 }
 
+// --- Provider outages ---------------------------------------------------------------------
+
+/** A provider's 503; `x-should-retry: false` stops the SDKs from retrying it. */
+const unavailable = { status: 503, headers: { 'retry-after': '30', 'x-should-retry': 'false' } };
+
+for (const [name, create] of [
+  ['openai', (url) => new OpenAIProvider('test-key', 'gpt-test', url)],
+  ['anthropic', (url) => new AnthropicProvider('test-key', 'claude-sonnet-5', url)],
+  ['ollama', (url) => new OllamaProvider(url, 'qwen3')],
+]) {
+  test(`${name}: a 503 becomes an LLMUnavailableError with the provider's Retry-After`, async (t) => {
+    const stub = await startStubServer(() => unavailable);
+    t.after(stub.close);
+    await assert.rejects(create(stub.url).chat([{ role: 'user', content: 'x' }]), (error) => {
+      assert.ok(error instanceof LLMUnavailableError);
+      assert.equal(error.retryAfterSeconds, 30);
+      assert.match(error.message, /temporarily unavailable/);
+      assert.match(error.providerMessage, /503/);
+      return true;
+    });
+  });
+}
+
+test('openai: a request that gets no answer times out as an LLMUnavailableError', async (t) => {
+  const stub = await startStubServer(() => new Promise(() => {}));
+  t.after(stub.close);
+  const provider = new OpenAIProvider('test-key', 'gpt-test', stub.url, { timeoutMs: 200, maxRetries: 0 });
+
+  await assert.rejects(provider.chat([{ role: 'user', content: 'x' }]), (error) => {
+    assert.ok(error instanceof LLMUnavailableError);
+    assert.match(error.providerMessage, /timed out/i);
+    return true;
+  });
+});
+
 // --- Factory -------------------------------------------------------------------------------
 
 test('factory: native tool calling by default for cloud providers, text for Ollama', () => {
@@ -215,6 +290,9 @@ test('factory: native tool calling by default for cloud providers, text for Olla
   assert.equal(createLLMProvider({ provider: 'ollama' }) instanceof OllamaProvider, false);
   assert.equal(createLLMProvider({ provider: 'ollama', toolCalling: 'native' }) instanceof OllamaProvider, true);
   assert.throws(() => readLLMConfigFromEnv({ LLM_TOOL_CALLING: 'magic' }), /native.*text/);
+  assert.equal(readLLMConfigFromEnv({ LLM_TIMEOUT_SECONDS: '45' }).timeoutSeconds, 45);
+  assert.throws(() => readLLMConfigFromEnv({ LLM_TIMEOUT_SECONDS: '0' }), /LLM_TIMEOUT_SECONDS/);
+  assert.throws(() => readLLMConfigFromEnv({ LLM_TIMEOUT_SECONDS: 'abc' }), /LLM_TIMEOUT_SECONDS/);
   assert.throws(() => createLLMProvider({ provider: 'anthropic' }), /LLM_API_KEY/);
 });
 

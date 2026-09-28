@@ -1,5 +1,11 @@
+import { LLMMalformedToolCallError } from './errors';
 import { toToolCall } from './toolArguments';
 import { type ChatReply, type LLMProvider, type LLMToolCall, type Message, type ToolResultMessage, type ToolSpec } from './types';
+
+/** Sent once after the provider rejects a native call attempt (Gemini's MALFORMED_FUNCTION_CALL). */
+const MALFORMED_CALL_NUDGE =
+  'Function calling is not available. Write the tool call as a plain-text JSON object ' +
+  '({ "name": ..., "arguments": ... }), or answer in plain text.';
 
 /**
  * Tool calling for models without native support: tools are described in the system
@@ -11,12 +17,14 @@ export function withTextToolProtocol(inner: LLMProvider): LLMProvider {
 
   return {
     async chat(messages, tools = []) {
-      const reply = await inner.chat(toTextMessages(messages, tools));
+      const reply = await chatWithRetry(inner, toTextMessages(messages, tools), tools);
       if (tools.length === 0) {
         return { ...reply, toolCalls: [] };
       }
 
-      const call = parseToolCallText(reply.content, new Set(tools.map((tool) => tool.name)));
+      // Some models (Gemini 3) turn the prompt's tool list into a native call even though no tools
+      // were declared; honor it rather than dropping it and returning its empty text as the answer.
+      const call = reply.toolCalls[0] ?? parseToolCallText(reply.content, new Set(tools.map((tool) => tool.name)));
       if (!call) {
         return { ...reply, toolCalls: [] };
       }
@@ -29,6 +37,22 @@ export function withTextToolProtocol(inner: LLMProvider): LLMProvider {
   };
 }
 
+/** Retries once, with a nudge toward plain-text JSON, when the model attempted a native call. */
+async function chatWithRetry(
+  inner: LLMProvider,
+  textMessages: readonly Message[],
+  tools: readonly ToolSpec[],
+): Promise<ChatReply> {
+  try {
+    return await inner.chat(textMessages);
+  } catch (error) {
+    if (!(error instanceof LLMMalformedToolCallError) || tools.length === 0) {
+      throw error;
+    }
+    return inner.chat([...textMessages, { role: 'user', content: MALFORMED_CALL_NUDGE }]);
+  }
+}
+
 export function buildToolInstructions(tools: readonly ToolSpec[]): string {
   const toolList = tools
     .map((tool) => `- ${tool.name}: ${tool.description}\n  arguments: ${JSON.stringify(tool.inputSchema)}`)
@@ -38,6 +62,8 @@ export function buildToolInstructions(tools: readonly ToolSpec[]): string {
 Tool use:
 - When a tool is needed, respond only with a JSON object shaped like:
   { "name": "tool_name", "arguments": { ... } }
+- Native function calling is not available. Write the JSON object as ordinary text in your
+  reply; it is read from your text.
 - When you need a tool, reply with the JSON object right away. Never describe or announce a
   tool call in words, and never ask for permission first.
 - Call one tool per reply. After each call you receive its result.

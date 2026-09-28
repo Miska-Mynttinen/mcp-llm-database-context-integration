@@ -3,6 +3,9 @@ const test = require('node:test');
 const { dist, scriptedLLM } = require('./helpers');
 
 const { withTextToolProtocol, toTextMessages } = dist('src/llm/textToolProtocol');
+const { LLMMalformedToolCallError } = dist('src/llm/errors');
+
+const malformed = () => new LLMMalformedToolCallError('function_call_filter: MALFORMED_FUNCTION_CALL');
 
 const tools = [{ name: 'lookup', description: 'Look up a key', inputSchema: { type: 'object', properties: { key: {} } } }];
 
@@ -18,6 +21,7 @@ test('describes tools in the system prompt and sends no native tools', async () 
   const [system] = inner.requests[0].messages;
   assert.match(system.content, /^Base rules\.\n\nTool use:/);
   assert.match(system.content, /- lookup: Look up a key\n {2}arguments: \{"type":"object"/);
+  assert.match(system.content, /Native function calling is not available/);
   assert.deepEqual(inner.requests[0].tools, []);
 });
 
@@ -47,6 +51,50 @@ test('finds a tool call written inside prose, and ignores prose without one', as
   assert.deepEqual(embedded.toolCalls.map((c) => [c.name, c.arguments]), [['lookup', { key: 'a "}" b' }]]);
   const prose = await provider.chat([{ role: 'user', content: 'b?' }], tools);
   assert.deepEqual(prose.toolCalls, []);
+});
+
+test('keeps a native tool call the model makes despite no declared tools, one per reply', async () => {
+  const inner = scriptedLLM([{
+    toolCalls: [
+      { id: 'native-1', name: 'lookup', arguments: { key: 'z' } },
+      { id: 'native-2', name: 'lookup', arguments: { key: 'w' } },
+    ],
+  }]);
+
+  const reply = await withTextToolProtocol(inner).chat([{ role: 'user', content: 'z?' }], tools);
+
+  assert.deepEqual(reply.toolCalls, [{ id: 'text-call-1', name: 'lookup', arguments: { key: 'z' } }]);
+  assert.equal(reply.content, '');
+});
+
+test('retries a rejected native call once, nudging toward plain-text JSON', async () => {
+  const inner = scriptedLLM([malformed(), '{"name":"lookup","arguments":{"key":"x"}}']);
+
+  const reply = await withTextToolProtocol(inner).chat([{ role: 'user', content: 'x?' }], tools);
+
+  assert.deepEqual(reply.toolCalls.map((c) => [c.name, c.arguments]), [['lookup', { key: 'x' }]]);
+  assert.equal(inner.requests.length, 2);
+  assert.equal(inner.requests[0].messages.at(-1).content, 'x?');
+  const nudge = inner.requests[1].messages.at(-1);
+  assert.equal(nudge.role, 'user');
+  assert.match(nudge.content, /Function calling is not available/);
+});
+
+test('gives up after a second rejected native call', async () => {
+  const inner = scriptedLLM([malformed(), malformed()]);
+
+  await assert.rejects(
+    withTextToolProtocol(inner).chat([{ role: 'user', content: 'x?' }], tools),
+    LLMMalformedToolCallError,
+  );
+  assert.equal(inner.requests.length, 2);
+});
+
+test('does not retry other errors', async () => {
+  const inner = scriptedLLM([new Error('boom')]);
+
+  await assert.rejects(withTextToolProtocol(inner).chat([{ role: 'user', content: 'x?' }], tools), /boom/);
+  assert.equal(inner.requests.length, 1);
 });
 
 test('treats JSON naming an unknown tool, or any JSON without tools, as a plain answer', async () => {

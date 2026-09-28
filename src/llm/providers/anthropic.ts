@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { LLMRateLimitError, retryAfterSeconds } from '../errors';
+import { LLMRateLimitError, LLMUnavailableError, retryAfterSeconds } from '../errors';
 import { toToolCall } from '../toolArguments';
 import { type ChatReply, type LLMProvider, type Message, type ToolResultMessage, type ToolSpec } from '../types';
 
@@ -43,7 +43,7 @@ export class AnthropicProvider implements LLMProvider {
       messages: toAnthropicMessages(messages),
       ...(tools.length > 0 ? { tools: tools.map(toAnthropicTool) } : {}),
       ...(useFallback ? { betas: [SERVER_FALLBACK_BETA], fallbacks: 'default' as const } : {}),
-    }).catch(rethrowRateLimit);
+    }).catch(rethrowProviderError);
 
     const usage = {
       promptTokens: response.usage.input_tokens,
@@ -142,9 +142,18 @@ function toolResultBlock(message: ToolResultMessage): ToolResultBlockParam {
   };
 }
 
-function rethrowRateLimit(error: unknown): never {
+/** Rate limits and outages become typed errors with user-safe messages; the rest pass through. */
+function rethrowProviderError(error: unknown): never {
   if (error instanceof Anthropic.RateLimitError) {
     throw new LLMRateLimitError(error.message, retryAfterSeconds(error.headers));
+  }
+  // The SDK uses InternalServerError for every status >= 500 (overloaded, unavailable, ...).
+  if (error instanceof Anthropic.InternalServerError) {
+    throw new LLMUnavailableError(error.message, retryAfterSeconds(error.headers));
+  }
+  // No response at all: a timeout (APIConnectionTimeoutError is a subclass) or a dropped connection.
+  if (error instanceof Anthropic.APIConnectionError) {
+    throw new LLMUnavailableError(error.message);
   }
   throw error;
 }

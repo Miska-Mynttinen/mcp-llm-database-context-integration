@@ -155,7 +155,8 @@ Messages are provider-neutral: `system`, `user`, `assistant` (which may carry `t
 Provider-specific behavior:
 
 - **Anthropic.** Replies are echoed back unchanged, including thinking blocks, for the rest of the turn through the opaque `providerState` field. A `refusal` stop reason returns a fixed answer and drops any tool calls, because a refusal can cut a tool call off mid-input. On models that support it, requests opt into the server-side refusal fallback.
-- **Text tool protocol.** `withTextToolProtocol` wraps any provider for models without native tool calling. It appends the tool list to the system prompt, asks for a bare (or ```` ```json ````-fenced) object `{ "name", "arguments" }`, and turns a reply naming a known tool into a tool call. A reply that wraps such an object in prose ("Let me check: {...}") counts too, because small models often announce the call instead of just making it. Tool results go back as user messages. It supports one call per reply. `LLM_TOOL_CALLING` picks the mode; the default is `native` for OpenAI and Anthropic and `text` for Ollama.
+- **OpenAI and compatible endpoints.** The raw `tool_calls` go into `providerState` and are sent back unchanged on the next tool step. This keeps fields the SDK doesn't type, such as the thought signature Gemini 3 attaches to each call (`extra_content.google.thought_signature`), which Gemini requires back; for OpenAI itself, the request is unchanged. Earlier turns are replayed as text, so nothing provider-specific is stored. A reply with no text and no tool calls throws. When its `finish_reason` contains `MALFORMED_FUNCTION_CALL` (Gemini blocked a function call it considered invalid), the error is `LLMMalformedToolCallError` (`src/llm/errors.ts`).
+- **Text tool protocol.** `withTextToolProtocol` wraps any provider for models without native tool calling. It appends the tool list to the system prompt, states that native function calling is unavailable, asks for a bare (or ```` ```json ````-fenced) object `{ "name", "arguments" }`, and turns a reply naming a known tool into a tool call. A reply that wraps such an object in prose ("Let me check: {...}") counts too, because small models often announce the call instead of just making it. A native call the model makes anyway is kept. If the provider blocks it instead (`LLMMalformedToolCallError`), the request is retried once with a closing user message asking for the JSON as plain text; a second failure, or any other error, fails the turn. Tool results go back as user messages. It supports one call per reply. `LLM_TOOL_CALLING` picks the mode; the default is `native` for OpenAI and Anthropic and `text` for Ollama.
 
 ## 6. Tools
 
@@ -381,7 +382,7 @@ node --test tests/chatTurn.test.js                            # one file
 node --test --test-name-pattern="step cap" tests/*.test.js    # tests whose name matches
 ```
 
-`npm test` runs `build:backend`, which builds the packages and the root app but not the frontend, then runs Node's built-in `node:test` runner: 256 tests in 18 files, with 60 skipped unless PostgreSQL and MySQL are configured. Tests load the compiled code from `dist/` and `packages/*/dist`, so rebuild after editing TypeScript. The exception is `login.test.js`, which imports the frontend's dependency-free `login.ts` directly.
+`npm test` runs `build:backend`, which builds the packages and the root app but not the frontend, then runs Node's built-in `node:test` runner: 289 tests in 18 files, with 62 skipped unless PostgreSQL and MySQL are configured. Tests load the compiled code from `dist/` and `packages/*/dist`, so rebuild after editing TypeScript. The exception is `login.test.js`, which imports the frontend's dependency-free `login.ts` directly.
 
 **Against PostgreSQL and MySQL.** The SQL contract tests (adapters, the SQL conversation store, `SqlTokenUsageStore`, the read-only login and seeding) always run against SQLite, and also against these servers when they're configured. Each test creates and drops its own database and logins, so the user needs to be able to create databases and manage users:
 
@@ -407,8 +408,8 @@ Each file tests one module through its public interface:
 | `conversationStore.test.js` | The `ConversationStore` contract on the in-memory and SQL stores: ownership, concurrent opens, limit clamping |
 | `toolRegistry.test.js` | `createTools` routing and failures as outcomes, MCP namespacing, `MCP_SERVER_URLS`, the history tool's scoping |
 | `chatTurn.test.js` | Session ownership, direct answers, single, parallel and multi-step tool calls, the step cap, tool failures, token usage |
-| `llmProviders.test.js` | Each real SDK or HTTP client against a local stub: tool definitions and calls, refusals, default tool-calling mode |
-| `textToolProtocol.test.js` | Tool instructions in the prompt, JSON reply parsing, unknown tool names |
+| `llmProviders.test.js` | Each real SDK or HTTP client against a local stub: tool definitions and calls, echoed tool calls (Gemini's thought signature), empty and blocked replies, refusals, default tool-calling mode |
+| `textToolProtocol.test.js` | Tool instructions in the prompt, JSON reply parsing, unknown tool names, native calls made anyway, the one retry after a blocked call |
 | `mcpServer.test.js` | The MCP server in-process with the real client: the catalogue, the SQL guard, `Host`, token and origin checks, session expiry, the built entry point |
 | `app.test.js` | `createApp`: validation, chat, history, `401`/`403`/`404` paths, sign-up, metric labels, `/metrics` not on the public app, `createMetricsApp` |
 | `rateLimit.test.js` | Every request limit, `off` limits, `RATE_LIMIT_*` and `TRUST_PROXY` parsing |

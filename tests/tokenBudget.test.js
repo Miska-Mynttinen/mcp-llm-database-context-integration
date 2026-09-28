@@ -9,7 +9,7 @@ const {
   utcDay,
 } = dist('src/tokenBudget');
 const { createMetrics, createTelemetry } = dist('src/observability');
-const { LLMRateLimitError } = dist('src/llm');
+const { LLMRateLimitError, LLMUnavailableError } = dist('src/llm');
 const { createSilentLogger } = require('@mcp-llm/runtime');
 
 /** A scripted LLM reply that reports `tokens` total tokens. */
@@ -107,6 +107,19 @@ test("the LLM provider's own rate limit is a 429 with its message and Retry-Afte
   const { error } = await response.json();
   assert.match(error, /AI service has reached its usage limit/);
   assert.doesNotMatch(error, /requests per day/, "the provider's wording stays in the logs");
+});
+
+test('an LLM provider outage is a 503 with a user-safe message, not a 500', async (t) => {
+  const request = await startApp(t, [new LLMUnavailableError('503 status code (no body)')]);
+  const response = await fetch(`${request.base}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await loginToken(request)}` },
+    body: JSON.stringify({ message: 'a' }),
+  });
+  assert.equal(response.status, 503);
+  const { error } = await response.json();
+  assert.match(error, /temporarily unavailable/);
+  assert.doesNotMatch(error, /status code/, "the provider's wording stays in the logs");
 });
 
 test('token budgets reset each UTC day', async () => {

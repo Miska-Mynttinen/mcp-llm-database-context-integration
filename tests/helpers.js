@@ -128,7 +128,7 @@ function scriptedLLM(replies) {
 
 /**
  * Local HTTP server standing in for a provider API; records each request's path, headers, and JSON body.
- * `respond` returns `{ body, status?, headers? }`.
+ * `respond` returns `{ body, status?, headers? }`, or a promise of it.
  */
 async function startStubServer(respond) {
   const http = require('node:http');
@@ -146,7 +146,11 @@ async function startStubServer(respond) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     requests,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    // closeAllConnections ends requests the stub never answered (timeout tests).
+    close: () => new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections();
+    }),
   };
 }
 
