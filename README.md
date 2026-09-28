@@ -4,6 +4,59 @@ A chat API and web UI that lets an LLM answer questions about a SQL database. Th
 
 Deployed at: https://chat.miska-mynttinen.fi/
 
+## Architecture
+
+A simplified view of the containers in `docker-compose.yaml` and where each part of the MCP protocol lives. The monitoring stack is left out, see [Monitoring](#monitoring).
+
+```mermaid
+flowchart LR
+  browser["Browser<br/>React chat UI"]
+
+  subgraph app["app container :3000"]
+    direction TB
+    api["REST API + JWT auth<br/>serves the UI"]
+    host["Chat turn<br/><b>MCP host</b>"]
+    client["<b>MCP client</b><br/>packages/mcp-client"]
+    history["get_conversation_history<br/>local tool"]
+    api --> host
+    host --> client
+    host --> history
+  end
+
+  subgraph mcp["mcp-server container :3001"]
+    direction TB
+    server["<b>MCP server</b><br/>packages/mcp-server"]
+    tools["<b>Tools</b><br/>get_database_schema<br/>list_tables<br/>get_table_columns<br/>execute_readonly_query"]
+    resource["<b>Resource</b><br/>database_schema_overview"]
+    server --> tools
+    server --> resource
+  end
+
+  subgraph pg["postgres container :5432"]
+    db[("App tables<br/>+ sample data")]
+  end
+
+  seed["db-seed<br/>one-shot"]
+  llm["LLM provider<br/>Ollama · OpenAI · Anthropic"]
+
+  browser -->|"HTTPS /api"| api
+  host -->|"prompt + tool definitions"| llm
+  client -->|"<b>Streamable HTTP</b> /mcp<br/>Bearer MCP_AUTH_TOKEN<br/>tools/list · tools/call<br/>resources/list · resources/read"| server
+  tools -->|"SQL as mcp_reader<br/>read-only"| db
+  resource -->|SQL| db
+  history -->|"SQL as owner<br/>app tables"| db
+  seed -.->|"schema, sample data,<br/>users, mcp_reader"| db
+```
+
+The app is the MCP **host**: its chat turn decides when the LLM's tool calls go to the MCP **client**, which talks to the MCP **server** over the Streamable HTTP **transport**. At startup the client lists the server's tools and resources. The tools are offered to the LLM, and the schema overview resource is put in its system prompt. The MCP server connects as the read-only `mcp_reader` login, so it can't see the app tables or write anything.
+
+## Original Thesis Architecture
+
+![Original thesis architecture: MES web clients behind a load balancer, MES web servers acting as MCP hosts with MCP clients, an MCP server over JSON-RPC to the Oracle database server, an external LLM host, and the MES application server](Original-thesis-architecture.png)
+
+
+## General
+
 The LLM backend and the database can each be swapped through their own config file (`.env.llm` and `.env.database`), with no code changes:
 
 | | Supported |
